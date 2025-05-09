@@ -1,25 +1,10 @@
+
 from machine import SoftI2C, Pin, I2C
 from utime import ticks_diff, ticks_ms, sleep
 from max30102 import MAX30102, MAX30105_PULSE_AMP_MEDIUM
 from math import sqrt
 from ssd1306 import SSD1306_I2C
 import dht
-import network
-import BlynkLib
-
-# Wi-Fi credentials
-SSID = 'COSMOTE-633526'
-PASSWORD = '96mk4hrrtxmgf733'
-
-BLYNK_AUTH = "TMPL4TisvEk6a"
-
-def connect_to_wifi(ssid, password):
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    wlan.connect(ssid, password)
-    while not wlan.isconnected():
-        pass
-    print("Connected to Wi-Fi:", wlan.ifconfig())
 
 
 SPO2_BUFFER_SIZE = 100
@@ -103,7 +88,7 @@ class HeartRateMonitor:
     
     
     
-def display_status(oled, bpm, status):
+def display_status(oled, bpm, spo2, status):
     oled.fill(0)  # Clear the display
 
     # Title (centered)
@@ -120,6 +105,12 @@ def display_status(oled, bpm, status):
     heart_rate_x = (oled_width - len(heart_rate_text) * 8) // 2
     oled.text(heart_rate_text, max(0, heart_rate_x), 20)  # Y=16 for the first row
 
+    # SpO2 (centered horizontally)
+    spo2_text = "SpO2: {}%".format(spo2 if spo2 else "--")
+    spo2_x = (oled_width - len(spo2_text) * 8) // 2
+    oled.text(spo2_text, max(0, spo2_x), 34)  # Y=28 for the second row
+
+   
 
     # Status Message (centered horizontally)
     status_text = "{}".format(status[:16])  # Truncate to 16 characters
@@ -130,11 +121,6 @@ def display_status(oled, bpm, status):
 
 
 def main():
-    # Connect to Wi-Fi
-    connect_to_wifi()
-    
-    # Initialize Blynk
-    blynk = BlynkLib.Blynk(BLYNK_AUTH)
     
     i2c=I2C(0,sda=Pin(0), scl=Pin(1), freq=400000)
     oled = SSD1306_I2C(128, 64, i2c)
@@ -209,23 +195,8 @@ def main():
             print("----")
             
             bpm_display = heart_rate if heart_rate else None
-            display_status(oled, bpm_display,  "Measuring...")
-            
-            # Send data to Blynk
-            blynk.virtual_write(0, heart_rate if heart_rate else 0)
-            blynk.virtual_write(1, spo2 if spo2 else 0)
-            blynk.virtual_write(2, temp if temp else 0)
-            blynk.virtual_write(3, hum if hum else 0)
-
-            # Run Blynk
-            blynk.run()
-            sleep(1)
-            
-            
+            spo2_display = spo2 if spo2 else None
+            display_status(oled, bpm_display, spo2_display, "Measuring...")
 
 if __name__ == "__main__":
     main()
-
-
-
-

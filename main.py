@@ -6,6 +6,12 @@ from math import sqrt
 from ssd1306 import SSD1306_I2C
 import dht
 
+import network
+import time
+
+from BlynkLib import Blynk
+import constants
+
 
 SPO2_BUFFER_SIZE = 100
 red_buffer = []
@@ -120,13 +126,44 @@ def display_status(oled, bpm, spo2, status):
     oled.show()  # Update the display
 
 
+def connect_to_internet(ssid, password):
+    # Pass in string arguments for ssid and password
+
+    # Just making our internet connection
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(ssid, password)
+
+    # Wait for connect or fail
+    max_wait = 10
+    while max_wait > 0:
+        if wlan.status() < 0 or wlan.status() >= 3:
+            break
+        max_wait -= 1
+        print('waiting for connection...')
+        time.sleep(1)
+    # Handle connection error
+    if wlan.status() != 3:
+        print(wlan.status())
+        raise RuntimeError('network connection failed')
+    else:
+        print('connected')
+        print(wlan.status())
+        status = wlan.ifconfig()
+    
+
+
 def main():
+    
+    connect_to_internet(constants.INTERNET_NAME, constants.INTERNET_PASSWORD)
     
     i2c=I2C(0,sda=Pin(0), scl=Pin(1), freq=400000)
     oled = SSD1306_I2C(128, 64, i2c)
     
     i2c = SoftI2C(sda=Pin(16), scl=Pin(17), freq=400000)
     sensor = MAX30102(i2c=i2c)
+    
+    BLYNK = Blynk(constants.BLYNK_AUTH_TOKEN)
 
     if sensor.i2c_address not in i2c.scan() or not sensor.check_part_id():
         print("Sensor not detected or not recognized.")
@@ -197,6 +234,10 @@ def main():
             bpm_display = heart_rate if heart_rate else None
             spo2_display = spo2 if spo2 else None
             display_status(oled, bpm_display, spo2_display, "Measuring...")
+            
+            BLYNK.virtual_write(2, temp)
+            BLYNK.run()
+            time.sleep(1)
 
 if __name__ == "__main__":
     main()

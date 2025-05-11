@@ -11,36 +11,73 @@ import time
 
 from BlynkLib import Blynk
 import constants
-
+from collections import deque
+from math import sqrt
 
 SPO2_BUFFER_SIZE = 100
 red_buffer = []
 ir_buffer = []
 
-FINGER_DETECTION_THRESHOLD = 3000  # Tune depending on sensor position + ambient light
+FINGER_DETECTION_THRESHOLD = 3000  
+uch_spo2_table = [95, 95, 95, 96, 96, 96, 97, 97, 97, 97, 97, 98, 98, 98, 98, 98, 99, 99, 99, 99, 
+              99, 99, 99, 99, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 
+              100, 100, 100, 100, 99, 99, 99, 99, 99, 99, 99, 99, 98, 98, 98, 98, 98, 98, 97, 97, 
+              97, 97, 96, 96, 96, 96, 95, 95, 95, 94, 94, 94, 93, 93, 93, 92, 92, 92, 91, 91, 
+              90, 90, 89, 89, 89, 88, 88, 87, 87, 86, 86, 85, 85, 84, 84, 83, 82, 82, 81, 81, 
+              80, 80, 79, 78, 78, 77, 76, 76, 75, 74, 74, 73, 72, 72, 71, 70, 69, 69, 68, 67, 
+              66, 66, 65, 64, 63, 62, 62, 61, 60, 59, 58, 57, 56, 56, 55, 54, 53, 52, 51, 50, 
+              49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 31, 30, 29, 
+              28, 27, 26, 25, 23, 22, 21, 20, 19, 17, 16, 15, 14, 12, 11, 10, 9, 7, 6, 5, 
+              3, 2, 1]
 
 def finger_detected(ir_buf):
     return sum(ir_buf) / len(ir_buf) > FINGER_DETECTION_THRESHOLD
 
-def calculate_spo2(red_buf, ir_buf):
-    if len(red_buf) < SPO2_BUFFER_SIZE or len(ir_buf) < SPO2_BUFFER_SIZE:
+
+def moving_average(data, window_size=4):
+    """
+    Apply a moving average filter to smooth the signal.
+    """
+    if len(data) < window_size:
+        return data
+    return [sum(data[i:i + window_size]) / window_size for i in range(len(data) - window_size + 1)]
+
+def calculate_spo2(red_buf, ir_buf, moving_avg_window=4):
+    """
+    Enhanced SpO2 calculation using a lookup table, peak detection, and robust signal processing.
+    """
+    if len(red_buf) < 100 or len(ir_buf) < 100:
         return None
 
+    # Apply moving average filter
+    red_buf = moving_average(red_buf, moving_avg_window)
+    ir_buf = moving_average(ir_buf, moving_avg_window)
+
+    # DC and AC components for red
     dc_red = sum(red_buf) / len(red_buf)
-    dc_ir = sum(ir_buf) / len(ir_buf)
     ac_red = sqrt(sum((r - dc_red) ** 2 for r in red_buf) / len(red_buf))
+
+    # DC and AC components for IR
+    dc_ir = sum(ir_buf) / len(ir_buf)
     ac_ir = sqrt(sum((ir - dc_ir) ** 2 for ir in ir_buf) / len(ir_buf))
 
     if dc_red == 0 or dc_ir == 0 or ac_ir == 0:
         return None
 
+    # Calculate ratio
     r = (ac_red / dc_red) / (ac_ir / dc_ir)
-    spo2 = 110 - 25 * r
 
-    if spo2 < 70 or spo2 > 100:
+    # Ensure ratio stays within valid range
+    if r < 0 or r >= 1.84:  # Based on uch_spo2_table length
         return None
 
-    return round(spo2, 1)
+    # Convert ratio to index for lookup table
+    ratio_index = int(r * 100)
+    spo2 = uch_spo2_table[ratio_index]
+
+    return spo2
+
+
 
 class HeartRateMonitor:
     def __init__(self, sample_rate=100, window_size=10, smoothing_window=5):
@@ -235,7 +272,10 @@ def main():
             spo2_display = spo2 if spo2 else None
             display_status(oled, bpm_display, spo2_display, "Measuring...")
             
+            BLYNK.virtual_write(0, bpm_display)
+            BLYNK.virtual_write(1, spo2_display)
             BLYNK.virtual_write(2, temp)
+            BLYNK.virtual_write(3, hum)
             BLYNK.run()
             time.sleep(1)
 

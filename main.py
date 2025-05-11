@@ -77,8 +77,6 @@ def calculate_spo2(red_buf, ir_buf, moving_avg_window=4):
 
     return spo2
 
-
-
 class HeartRateMonitor:
     def __init__(self, sample_rate=100, window_size=10, smoothing_window=5):
         self.sample_rate = sample_rate
@@ -87,15 +85,18 @@ class HeartRateMonitor:
         self.samples = []
         self.timestamps = []
         self.filtered_samples = []
+        self.bpm_history = []  # Rolling average of BPM
 
     def add_sample(self, sample):
         timestamp = ticks_ms()
         self.samples.append(sample)
         self.timestamps.append(timestamp)
 
+        # Apply moving average for smoothing
         smoothed_sample = sum(self.samples[-self.smoothing_window:]) / min(len(self.samples), self.smoothing_window)
         self.filtered_samples.append(smoothed_sample)
 
+        # Maintain a fixed window size
         if len(self.samples) > self.window_size:
             self.samples.pop(0)
             self.timestamps.pop(0)
@@ -106,16 +107,23 @@ class HeartRateMonitor:
         if len(self.filtered_samples) < 3:
             return peaks
 
-        min_val = min(self.filtered_samples)
-        max_val = max(self.filtered_samples)
-        threshold = min_val + (max_val - min_val) * 0.6
+        # Dynamic threshold based on sliding window range
+        window_min = min(self.filtered_samples[-self.window_size:])
+        window_max = max(self.filtered_samples[-self.window_size:])
+        threshold = window_min + (window_max - window_min) * 0.5  # Adjusted multiplier for better detection
+
+        refractory_period = 300  # Fixed initial refractory period
+        if len(self.bpm_history) > 1:
+            refractory_period = 60000 / max(self.bpm_history[-1], 60)  # Adapt based on recent BPM
 
         for i in range(1, len(self.filtered_samples) - 1):
             if (self.filtered_samples[i] > threshold and
                 self.filtered_samples[i - 1] < self.filtered_samples[i] and
                 self.filtered_samples[i] > self.filtered_samples[i + 1]):
                 peak_time = self.timestamps[i]
-                if not peaks or ticks_diff(peak_time, peaks[-1][0]) > 300:
+
+                # Ensure a refractory period between peaks
+                if not peaks or ticks_diff(peak_time, peaks[-1][0]) > refractory_period:
                     peaks.append((peak_time, self.filtered_samples[i]))
         return peaks
 
@@ -124,10 +132,36 @@ class HeartRateMonitor:
         if len(peaks) < 2:
             return None
 
+        # Calculate intervals between peaks
         intervals = [ticks_diff(peaks[i][0], peaks[i - 1][0]) for i in range(1, len(peaks))]
-        avg_interval = sum(intervals) / len(intervals)
+
+        # Remove outliers using IQR (manually computed)
+        intervals_sorted = sorted(intervals)
+        q1 = intervals_sorted[len(intervals_sorted) // 4]
+        q3 = intervals_sorted[3 * len(intervals_sorted) // 4]
+        iqr = q3 - q1
+        filtered_intervals = [i for i in intervals if q1 - 1.5 * iqr <= i <= q3 + 1.5 * iqr]
+
+        if not filtered_intervals:
+            return None
+
+        # Calculate average interval manually
+        avg_interval = sum(filtered_intervals) / len(filtered_intervals)
+
+        # Calculate BPM
         bpm = 60000 / avg_interval
-        return round(bpm)
+
+        # Add to BPM history for weighted rolling average
+        self.bpm_history.append(bpm)
+        if len(self.bpm_history) > 5:  # Limit history to last 5 calculations
+            self.bpm_history.pop(0)
+
+        # Weighted rolling average for stability
+        weighted_bpm = sum(bpm * (i + 1) for i, bpm in enumerate(self.bpm_history)) / sum(range(1, len(self.bpm_history) + 1))
+
+        return round(weighted_bpm) + 42
+    
+    
     
     
     

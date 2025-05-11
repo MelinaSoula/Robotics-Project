@@ -15,10 +15,8 @@ from collections import deque
 from math import sqrt
 
 SPO2_BUFFER_SIZE = 100
-red_buffer = []
-ir_buffer = []
 
-FINGER_DETECTION_THRESHOLD = 3000  
+FINGER_DETECTION_THRESHOLD = 15000  
 uch_spo2_table = [95, 95, 95, 96, 96, 96, 97, 97, 97, 97, 97, 98, 98, 98, 98, 98, 99, 99, 99, 99, 
               99, 99, 99, 99, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 
               100, 100, 100, 100, 99, 99, 99, 99, 99, 99, 99, 99, 98, 98, 98, 98, 98, 98, 97, 97, 
@@ -225,6 +223,9 @@ def connect_to_internet(ssid, password):
 
 
 def main():
+    red_buffer = []
+    ir_buffer = []
+
     
     connect_to_internet(constants.INTERNET_NAME, constants.INTERNET_PASSWORD)
     
@@ -260,6 +261,8 @@ def main():
     )
 
     ref_time = ticks_ms()
+    
+    timer = 14
 
     while True:
         sensor.check()
@@ -283,6 +286,11 @@ def main():
                 print("Finger not detected. Place finger on sensor.")
                 print("----")
                 display_status(oled, None, None, "No finger detect")
+                
+                red_buffer = []
+                ir_buffer = []
+                
+                timer = 14
                 continue
 
             heart_rate = hr_monitor.calculate_heart_rate()
@@ -296,22 +304,31 @@ def main():
                 temp = None
                 hum = None
                 print("DHT11 error:", e)
+            
+            if(timer==0 ):
+                
 
-            print(f"Heart Rate: {heart_rate if heart_rate else 'Not enough data'} BPM")
-            print(f"SpO2: {spo2 if spo2 else 'Not enough data'}%")
-            print(f"Temperature: {temp if temp else '--'}°C, Humidity: {hum if hum else '--'}%")
-            print("----")
+                print(f"Heart Rate: {heart_rate if heart_rate else 'Not enough data'} BPM")
+                print(f"SpO2: {spo2 if spo2 else 'Not enough data'}%")
+                print(f"Temperature: {temp if temp else '--'}°C, Humidity: {hum if hum else '--'}%")
+                print("----")
             
-            bpm_display = heart_rate if heart_rate else None
-            spo2_display = spo2 if spo2 else None
-            display_status(oled, bpm_display, spo2_display, "Measuring...")
+                bpm_display = heart_rate if heart_rate else None
+                spo2_display = spo2 if spo2 else None
+                display_status(oled, bpm_display, spo2_display, "Measuring...")
             
-            BLYNK.virtual_write(0, bpm_display)
-            BLYNK.virtual_write(1, spo2_display)
-            BLYNK.virtual_write(2, temp)
-            BLYNK.virtual_write(3, hum)
+                BLYNK.virtual_write(0, bpm_display)
+                BLYNK.virtual_write(1, spo2_display)
+                BLYNK.virtual_write(2, temp)
+                BLYNK.virtual_write(3, hum) 
+            else:
+                print(f"Not enough data. Wait more {timer} sec")
+            
             BLYNK.run()
             time.sleep(1)
+            
+            if (timer != 0 ):
+                timer -= 1
 
 if __name__ == "__main__":
     main()

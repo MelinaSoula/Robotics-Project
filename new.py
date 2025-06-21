@@ -15,6 +15,14 @@ from sgp30 import Adafruit_SGP30
 from time import time
 from machine import PWM
 
+TEST_MODE = True
+TEMP = 30          
+HUM = 90         
+CO2 = 4000        
+TVOC = 600
+
+HEART_RATE = 200   
+SPO2 = 100
 
 # Environmental Thresholds
 CO2_THRESHOLD = 5000  # ppm
@@ -74,6 +82,9 @@ uch_spo2_table = [95, 95, 95, 96, 96, 96, 97, 97, 97, 97, 97, 98, 98, 98, 98, 98
               49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 31, 30, 29, 
               28, 27, 26, 25, 23, 22, 21, 20, 19, 17, 16, 15, 14, 12, 11, 10, 9, 7, 6, 5, 
               3, 2, 1]
+
+
+
 
 def finger_detected(ir_buf):
     return sum(ir_buf) / len(ir_buf) > FINGER_DETECTION_THRESHOLD
@@ -492,10 +503,16 @@ def main():
             finger_on_sensor = finger_detected(ir_buffer)
 
             '''Environmental Data - always updated'''
-            temp, hum = read_dht_sensor(dht_sensor)
-            co2, tvoc = read_sgp30_sensor(sgp30)
-            
-            if not finger_detected(ir_buffer):
+            if TEST_MODE:
+                temp = TEMP           # 15°C to 30°C
+                hum = HUM          # 30% to 70%
+                co2 = CO2         # 400 to 3400 ppm
+                tvoc = TVOC         # 100 to 1100 ppb
+            else:
+                temp, hum = read_dht_sensor(dht_sensor)
+                co2, tvoc = read_sgp30_sensor(sgp30)
+                
+            if not finger_detected(ir_buffer) and not TEST_MODE :
                 
                finger_present = False
                print("Finger not detected. Place finger on sensor.")
@@ -523,8 +540,13 @@ def main():
                 
                continue
 
-            heart_rate = hr_monitor.calculate_heart_rate()
-            spo2 = calculate_spo2(red_buffer, ir_buffer)
+            if TEST_MODE:
+                finger_on_sensor = True # Always pretend finger is on
+                heart_rate = HEART_RATE    # 40-110 BPM
+                spo2 = SPO2           # 85-95%
+            else:
+                heart_rate = hr_monitor.calculate_heart_rate()
+                spo2 = calculate_spo2(red_buffer, ir_buffer)
             
             if(timer==0 ):
                 print(f"Heart Rate: {heart_rate if heart_rate else 'Not enough data'} BPM")

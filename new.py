@@ -456,7 +456,7 @@ def main():
     dht_sensor, sgp30 = dht_and_sgp30()
     
     ''' Initialize Blynk '''
-    BLYNK = Blynk(constants.BLYNK_AUTH_TOKEN2)
+    BLYNK = Blynk(constants.BLYNK_AUTH_TOKEN)
     
     '''Initialize hr_monitor'''
     hr_monitor = HeartRateMonitor(
@@ -513,6 +513,14 @@ def main():
                timer = 2
                
                display_status1(oled, None, None, "No finger", temp, hum, co2, tvoc)
+               
+               BLYNK.virtual_write(0, temp)
+               BLYNK.virtual_write(1, hum)
+               BLYNK.virtual_write(5, co2)
+               BLYNK.virtual_write(4, tvoc)
+               BLYNK.virtual_write(9,   0)
+               BLYNK.virtual_write(8,   0)
+                
                continue
 
             heart_rate = hr_monitor.calculate_heart_rate()
@@ -555,7 +563,7 @@ def main():
             oled,
             bpm=bpm_display,
             spo2=spo2_display,
-            status="Measuring...",
+            status=status,
             temp=temp,
             hum=hum,
             co2=co2,
@@ -567,14 +575,13 @@ def main():
                 last_screen_switch = ticks_ms()
 
             #display_status(oled, bpm_display, spo2_display, co2, tvoc, temp, hum, screen_state)
-
+            
             BLYNK.virtual_write(0, temp)
             BLYNK.virtual_write(1, hum)
             BLYNK.virtual_write(5, co2)
             BLYNK.virtual_write(4, tvoc)
-            BLYNK.virtual_write(9, heart_rate if heart_rate else 0)
-            BLYNK.virtual_write(8, spo2 if spo2 else 0)
-            
+            BLYNK.virtual_write(9, heart_rate if heart_rate  else 0)
+            BLYNK.virtual_write(8, spo2 if spo2  else 0)
             
 # Only process alerts if both heart_rate and spo2 are available
         if heart_rate is not None and spo2 is not None:
@@ -742,3 +749,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

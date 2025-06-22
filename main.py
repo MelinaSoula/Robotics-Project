@@ -15,7 +15,7 @@ from sgp30 import Adafruit_SGP30
 from time import time, sleep_ms
 from machine import PWM
 
-TEST_MODE = True
+TEST_MODE = False
 TEMP = 22          
 HUM = 100         
 CO2 = 3000        

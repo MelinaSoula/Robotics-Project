@@ -15,23 +15,23 @@ from sgp30 import Adafruit_SGP30
 from time import time, sleep_ms
 from machine import PWM
 
-TEST_MODE = True
+TEST_MODE = False
 TEMP = 20          
 HUM = 50         
-CO2 = 4000        
+CO2 = 7000        
 TVOC = 300
 
-HEART_RATE = 200   
+HEART_RATE =150 
 SPO2 = 100
 
 '''
-Only BPM abnormal Doctor Short 2x beep (e.g. beeeeeep)
-Only Environment abnormal Nurse 1 long beep (e.g. beep–beep)
+Only BPM abnormal Doctor long beep  (e.g. beeeeeep)
+Only Environment abnormal Nurse Short 2x beep (e.g. beep–beep)
 Both BPM and Environment abnormal Nurse 3 quick beeps (e.g. beep-beep-beep)
 '''
 
 # Environmental Thresholds
-CO2_THRESHOLD = 5000  # ppm
+CO2_THRESHOLD = 5  # ppm 5000
 TEMP_HIGH_THRESHOLD = 30  # °C
 TEMP_LOW_THRESHOLD = 10  # °C
 HUMIDITY_THRESHOLD = 80  # %
@@ -117,12 +117,11 @@ def buzzer_beep(alert_type):
 
     elif alert_type == 'nurse_both':
         buzzer.freq(4400)
-        for _ in range(3):
-            buzzer.duty_u16(60000)
-            sleep_ms(120)
-            buzzer.duty_u16(0)
-            sleep_ms(120)
-
+        for _ in range(5):
+            buzzer.duty_u16(60000) #Turn sound ON (50% duty cycle)
+            sleep_ms(150)  #Beep for 150ms
+            buzzer.duty_u16(0) # Turn sound OFF
+            sleep_ms(150)  #Pause
 
 
 def finger_detected(ir_buf):
@@ -322,19 +321,13 @@ def connect_to_internet(ssid, password):
         print(wlan.status())
         status = wlan.ifconfig()
 
-def should_alert(key, is_abnormal, now):
-    if is_abnormal:
-        if abnormal_start_times[key] is None:
-            abnormal_start_times[key] = now
-        elif now - abnormal_start_times[key] >= ALERT_STABLE_DURATION:
-            return True
-    else:
-        abnormal_start_times[key] = None
-    return False
 
 
-ALERT_COOLDOWN = 60  # for buzzer, in seconds
-BLYNK_ALERT_COOLDOWN = 20  # for BLYNK notification, in seconds
+
+ALERT_COOLDOWN = 7  # for buzzer, in seconds
+ALERT_STABLE_DURATION = 14 
+
+BLYNK_ALERT_COOLDOWN = 180  # for BLYNK notification, in seconds
 
 # Track last alert time for both buzzer and BLYNK
 last_alert_times = {
@@ -342,12 +335,6 @@ last_alert_times = {
     "patient_condition": 0,
     "patient_discomfort": 0
 }
-
-ALERT_STABLE_DURATION = 14 
-
-
-
-
 
 abnormal_start_times = {
     "room_conditions": None,
@@ -705,35 +692,37 @@ def main():
             
             if heart_rate  and spo2 :
                 now = time()
-
+                env_alerts =[]
+                heart_alerts = []
+                all_alerts = []
                 #  1. Detect environmental abnormalities
     
                 if co2  and co2 > CO2_THRESHOLD:
                     env_alerts.append(f"⚠️ CO2 High: {co2} ppm")
-                if temp:
+                elif temp:
                     if temp > TEMP_HIGH_THRESHOLD:
                         env_alerts.append(f"🔥 High Temp: {temp}°C")
                     elif temp < TEMP_LOW_THRESHOLD:
                         env_alerts.append(f"❄️ Low Temp: {temp}°C")
-                if hum and hum > HUMIDITY_THRESHOLD:
+                elif hum and hum > HUMIDITY_THRESHOLD:
                     env_alerts.append(f"💧 High Humidity: {hum}%")
-                if tvoc and tvoc > TVOC_THRESHOLD:
+                elif tvoc and tvoc > TVOC_THRESHOLD:
                     env_alerts.append(f"⚠️ High TVOC: {tvoc} ppb")
-                if co2 < CO2_THRESHOLD and temp <TEMP_HIGH_THRESHOLD and temp>TEMP_LOW_THRESHOLD and hum < HUMIDITY_THRESHOLD and tvoc < TVOC_THRESHOLD:
+                elif co2 < CO2_THRESHOLD and temp <TEMP_HIGH_THRESHOLD and temp>TEMP_LOW_THRESHOLD and hum < HUMIDITY_THRESHOLD and tvoc < TVOC_THRESHOLD:
                     env_alerts =[]
 
                 # 🔴 2. Detect heart condition alerts
                 
-                if heart_rate > 100:
+                if heart_rate > BPM_HIGH_THRESHOLD:
                     heart_alerts.append(f"⚠️ High BPM: {heart_rate} bpm (Tachycardia)")
-                elif heart_rate < 60:
+                elif heart_rate < BPM_LOW_THRESHOLD:
                     heart_alerts.append(f"⚠️ Low BPM: {heart_rate} bpm (Bradycardia)")
                
                 
-                if spo2 < 95:
+                if spo2 < SPO2_LOW_THRESHOLD:
                     heart_alerts.append(f"⚠️ Low SpO₂: {spo2}%")
                     
-                if spo2 > 95 and heart_rate < 100 and heart_rate >60:
+                if spo2 > SPO2_LOW_THRESHOLD and heart_rate < BPM_HIGH_THRESHOLD and heart_rate > BPM_LOW_THRESHOLD:
                     heart_alerts = []   
 
                 # 🔵 3. Decide who to alert and beep appropriately

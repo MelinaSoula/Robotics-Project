@@ -15,18 +15,18 @@ from sgp30 import Adafruit_SGP30
 from time import time, sleep_ms
 from machine import PWM
 
-TEST_MODE = False
-TEMP = 22          
-HUM = 100         
-CO2 = 3000        
+TEST_MODE = True
+TEMP = 20          
+HUM = 50         
+CO2 = 4000        
 TVOC = 300
 
-HEART_RATE = 150   
+HEART_RATE = 200   
 SPO2 = 100
 
 '''
-Only BPM abnormal Doctor Short 2x beep (e.g. beep–beep)
-Only Environment abnormal Nurse 1 long beep (e.g. beeeeeep)
+Only BPM abnormal Doctor Short 2x beep (e.g. beeeeeep)
+Only Environment abnormal Nurse 1 long beep (e.g. beep–beep)
 Both BPM and Environment abnormal Nurse 3 quick beeps (e.g. beep-beep-beep)
 '''
 
@@ -41,6 +41,7 @@ TVOC_THRESHOLD = 500  # ppb
 BPM_HIGH_THRESHOLD = 100  # bpm (Tachycardia)
 BPM_LOW_THRESHOLD = 60  # bpm (Bradycardia)
 SPO2_LOW_THRESHOLD = 95  # % (Low SpO2)
+
 
 # Icons
 thermo_icon = bytearray([
@@ -72,7 +73,7 @@ spo2_icon = bytearray([
     0x08, 0x1C, 0x3E, 0x7F, 0x7F, 0x3E, 0x1C, 0x08  
 ])
 spo2_fb = framebuf.FrameBuffer(spo2_icon, 8, 8, framebuf.MONO_HLSB)
-
+ 
 
 # MAX30102
 SPO2_BUFFER_SIZE = 100
@@ -89,25 +90,35 @@ uch_spo2_table = [95, 95, 95, 96, 96, 96, 97, 97, 97, 97, 97, 98, 98, 98, 98, 98
               28, 27, 26, 25, 23, 22, 21, 20, 19, 17, 16, 15, 14, 12, 11, 10, 9, 7, 6, 5, 
               3, 2, 1]
 
+def buzzer_control_handler(value):
+    global buzzer_muted
+    buzzer_muted = (int(value[0]) == 1)
+    
 def buzzer_beep(alert_type):
+    if buzzer_muted:
+        return
+    
     if alert_type == 'doctor':
         buzzer.freq(4400)
+        
+        buzzer.duty_u16(60000)
+        sleep_ms(1000)
+        buzzer.duty_u16(0)
+        
+
+    elif alert_type == 'nurse_env':
+        buzzer.freq(4400) # 3600
+        
         for _ in range(2):
-            buzzer.duty_u16(32768) #Turn sound ON (50% duty cycle)
+            buzzer.duty_u16(60000) #Turn sound ON (50% duty cycle)
             sleep_ms(150)  #Beep for 150ms
             buzzer.duty_u16(0) # Turn sound OFF
             sleep_ms(150)  #Pause
 
-    elif alert_type == 'nurse_env':
-        buzzer.freq(1000)
-        buzzer.duty_u16(32768)
-        sleep_ms(600)
-        buzzer.duty_u16(0)
-
     elif alert_type == 'nurse_both':
-        buzzer.freq(1000)
+        buzzer.freq(4400)
         for _ in range(3):
-            buzzer.duty_u16(32768)
+            buzzer.duty_u16(60000)
             sleep_ms(120)
             buzzer.duty_u16(0)
             sleep_ms(120)
@@ -301,7 +312,7 @@ def connect_to_internet(ssid, password):
             break
         max_wait -= 1
         print('waiting for connection...')
-        time.sleep(1)
+        sleep(1)
     # Handle connection error
     if wlan.status() != 3:
         print(wlan.status())
@@ -311,15 +322,32 @@ def connect_to_internet(ssid, password):
         print(wlan.status())
         status = wlan.ifconfig()
 
-# Globlas for main function
-ALERT_COOLDOWN = 60  
-ALERT_STABLE_DURATION = 20  
+def should_alert(key, is_abnormal, now):
+    if is_abnormal:
+        if abnormal_start_times[key] is None:
+            abnormal_start_times[key] = now
+        elif now - abnormal_start_times[key] >= ALERT_STABLE_DURATION:
+            return True
+    else:
+        abnormal_start_times[key] = None
+    return False
 
+
+ALERT_COOLDOWN = 60  # for buzzer, in seconds
+BLYNK_ALERT_COOLDOWN = 20  # for BLYNK notification, in seconds
+
+# Track last alert time for both buzzer and BLYNK
 last_alert_times = {
     "room_conditions": 0,
     "patient_condition": 0,
     "patient_discomfort": 0
 }
+
+ALERT_STABLE_DURATION = 14 
+
+
+
+
 
 abnormal_start_times = {
     "room_conditions": None,
@@ -327,19 +355,14 @@ abnormal_start_times = {
     "patient_discomfort": None
 }
 
+last_alert_times = {
+    "room_conditions": 0,
+    "patient_condition": 0,
+    "patient_discomfort": 0
+}
 buzzer = PWM(Pin(15))
 buzzer.freq(4400)
 buzzer.duty_u16(0)
-
-
-co2_alert_state = {
-    "start_time": None,
-    "last_alert_time": 0,
-    "mode": None,  # 'beep' or 'continuous'
-    "active": False,
-    "buzzer_start_time": None,
-    "last_beep_time": None
-}
 
   
 def initialize_display():
@@ -460,44 +483,68 @@ def display_status1(oled, bpm=None, spo2=None, status="", temp=None, hum=None, c
     oled.fill(0)  # Clear screen
     oled_width = 128
 
-    # Title (centered)
-    title = "OXIMETER"
-    title_x = (oled_width - len(title) * 8) // 2
-    oled.text(title, title_x, 0)
-
-    # Horizontal separator
-    oled.hline(0, 12, oled_width, 1)
-
     if bpm is not None and spo2 is not None and bpm != "Measuring":
-        # Show vitals (centered)
+        title = "VITALS"
+        title_x = (oled_width - len(title) * 8) // 2
+        oled.text(title, title_x, 0)
+
+        # Horizontal separator
+        oled.hline(0, 12, oled_width, 1)
+
+        # Text lines
         heart_text = "BPM: {}".format(bpm)
         spo2_text = "SpO2: {}%".format(spo2)
-        oled.text(heart_text, (oled_width - len(heart_text) * 8) // 2, 20)
-        oled.text(spo2_text, (oled_width - len(spo2_text) * 8) // 2, 34)
+
+        # Compute block width with icon (8px) + spacing (2px) + text width
+        heart_block_w = 8 + 2 + len(heart_text) * 8
+        spo2_block_w = 8 + 2 + len(spo2_text) * 8
+
+        # Centered X positions
+        heart_x = (oled_width - heart_block_w) // 2
+        spo2_x = (oled_width - spo2_block_w) // 2
+
+        # Draw icons and text centered as a group
+        oled.blit(heart_fb, heart_x, 20)
+        oled.text(heart_text, heart_x + 10, 20)
+
+        oled.blit(spo2_fb, spo2_x, 34)
+        oled.text(spo2_text, spo2_x + 10, 34)
+
 
     else:
+        title = "ENVIROMENT"
+        title_x = (oled_width - len(title) * 8) // 2
+        oled.text(title, title_x, 0)
+
+        # Horizontal separator
+        oled.hline(0, 12, oled_width, 1)
         # Show environmental data
         lines = [
-            "T: {}C".format(temp if temp is not None else "--"),
-            "H: {}%".format(hum if hum is not None else "--"),
-            "CO2: {}".format(co2 if co2 is not None else "--"),
-            "TVOC: {}".format(tvoc if tvoc is not None else "--")
+            ("T: {}C".format(temp if temp is not None else "--"), thermo_fb),
+            ("H: {}%".format(hum if hum is not None else "--"), water_fb),
+            ("CO2: {}".format(co2 if co2 is not None else "--"), co2_fb),
+            ("TVOC: {}".format(tvoc if tvoc is not None else "--"), warning_fb)
         ]
-        for i, line in enumerate(lines):
-            oled.text(line, 0, 16 + (i * 10))
+
+        for i, (line, icon_fb) in enumerate(lines):
+            y = 16 + (i * 10)
+            oled.blit(icon_fb, 0, y)         # Draw icon
+            oled.text(line, 10, y)           # Text offset to the right of icon
+
 
     # Status at bottom
     status = status[:16]  # Truncate if too long
     oled.text(status, (oled_width - len(status) * 8) // 2, 56)
 
     oled.show()
-
+    
+buzzer_muted = False
 def main():
     # Initialize sensor buffers
     red_buffer = []
     ir_buffer = []
     # Internet connection
-    connect_to_internet(constants.INTERNET_NAME, constants.INTERNET_PASSWORD)
+    connect_to_internet(constants.INTERNET_NAME2, constants.INTERNET_PASSWORD2)
 
     '''Initialize OLED and MAX30102'''
     oled = initialize_display()
@@ -506,7 +553,7 @@ def main():
     dht_sensor, sgp30 = dht_and_sgp30()
     
     ''' Initialize Blynk '''
-    BLYNK = Blynk(constants.BLYNK_AUTH_TOKEN)
+    BLYNK = Blynk(constants.BLYNK_AUTH_TOKEN2)
     
     '''Initialize hr_monitor'''
     hr_monitor = HeartRateMonitor(
@@ -533,7 +580,17 @@ def main():
     
     
 
+
+    @BLYNK.on("V10")
+    def buzzer_control_handler(value):
+        global buzzer_muted
+        buzzer_muted = (int(value[0]) == 1)
+    BLYNK.sync_virtual(10)
+    
+    heart_alerts = []
+    env_alerts = []
     while True:
+       
         acquire_max_data(sensor, red_buffer, ir_buffer, hr_monitor, SPO2_BUFFER_SIZE)
 
         ''' Data processing every 2 seconds'''
@@ -551,9 +608,8 @@ def main():
                 temp, hum = read_dht_sensor(dht_sensor)
                 co2, tvoc = read_sgp30_sensor(sgp30)
                 
-            if not finger_detected(ir_buffer) and not TEST_MODE :
-                
-               finger_present = False
+            if not finger_on_sensor and not TEST_MODE :
+               
                print("Finger not detected. Place finger on sensor.")
                print("Finger not detected. Place finger on sensor.")
                print("Environmental Data:")
@@ -578,33 +634,36 @@ def main():
                BLYNK.virtual_write(8,   0)
                 
                continue
+            if timer == 0:
+                if TEST_MODE:
+                    finger_on_sensor = True
+                    heart_rate = HEART_RATE
+                    spo2 = SPO2
+                else:
+                    heart_rate = hr_monitor.calculate_heart_rate()
+                    spo2 = calculate_spo2(red_buffer, ir_buffer)
 
-            if TEST_MODE:
-                finger_on_sensor = True # Always pretend finger is on
-                heart_rate = HEART_RATE    # 40-110 BPM
-                spo2 = SPO2           # 85-95%
-            else:
-                heart_rate = hr_monitor.calculate_heart_rate()
-                spo2 = calculate_spo2(red_buffer, ir_buffer)
-            
-            if(timer==0 ):
                 print(f"Heart Rate: {heart_rate if heart_rate else 'Not enough data'} BPM")
                 print(f"SpO2: {spo2 if spo2 else 'Not enough data'}%")
                 print("----")
-                
-                
             else:
+                heart_rate = None
+                spo2 = None
                 print(f"Not enough data. Wait more {timer} sec")
+                timer -= 1
+               
+
             
             # Display and Blynk Updates
             if not finger_on_sensor:
                 bpm_display = "No finger"
                 spo2_display = "No finger"
+                status = "No finger"
                 heart_rate = None
                 spo2 = None
             elif timer > 0:
-                bpm_display= "Measuring"
-                spo2_display= "Measuring"
+                bpm_display = "Measuring"
+                spo2_display = "Measuring"
                 status = f"Wait {timer} sec"
                 timer -= 1
             else:
@@ -644,75 +703,84 @@ def main():
             BLYNK.virtual_write(9, heart_rate if heart_rate  else 0)
             BLYNK.virtual_write(8, spo2 if spo2  else 0)
             
-        # Only process alerts if both heart_rate and spo2 are available
-        if heart_rate is not None and spo2 is not None:
-            now = time()
+            if heart_rate  and spo2 :
+                now = time()
 
-            # 🟡 1. Detect environmental abnormalities
-            env_alerts = []
-            if co2 is not None and co2 > CO2_THRESHOLD:
-                env_alerts.append(f"⚠️ CO2 High: {co2} ppm")
-            if temp is not None:
-                if temp > TEMP_HIGH_THRESHOLD:
-                    env_alerts.append(f"🔥 High Temp: {temp}°C")
-                elif temp < TEMP_LOW_THRESHOLD:
-                    env_alerts.append(f"❄️ Low Temp: {temp}°C")
-            if hum is not None and hum > HUMIDITY_THRESHOLD:
-                env_alerts.append(f"💧 High Humidity: {hum}%")
-            if tvoc is not None and tvoc > TVOC_THRESHOLD:
-                env_alerts.append(f"⚠️ High TVOC: {tvoc} ppb")
+                #  1. Detect environmental abnormalities
+    
+                if co2  and co2 > CO2_THRESHOLD:
+                    env_alerts.append(f"⚠️ CO2 High: {co2} ppm")
+                if temp:
+                    if temp > TEMP_HIGH_THRESHOLD:
+                        env_alerts.append(f"🔥 High Temp: {temp}°C")
+                    elif temp < TEMP_LOW_THRESHOLD:
+                        env_alerts.append(f"❄️ Low Temp: {temp}°C")
+                if hum and hum > HUMIDITY_THRESHOLD:
+                    env_alerts.append(f"💧 High Humidity: {hum}%")
+                if tvoc and tvoc > TVOC_THRESHOLD:
+                    env_alerts.append(f"⚠️ High TVOC: {tvoc} ppb")
+                if co2 < CO2_THRESHOLD and temp <TEMP_HIGH_THRESHOLD and temp>TEMP_LOW_THRESHOLD and hum < HUMIDITY_THRESHOLD and tvoc < TVOC_THRESHOLD:
+                    env_alerts =[]
 
-            # 🔴 2. Detect heart condition alerts
-            heart_alerts = []
-            if heart_rate > 100:
-                heart_alerts.append(f"⚠️ High BPM: {heart_rate} bpm (Tachycardia)")
-            elif heart_rate < 60:
-                heart_alerts.append(f"⚠️ Low BPM: {heart_rate} bpm (Bradycardia)")
-            if spo2 < 95:
-                heart_alerts.append(f"⚠️ Low SpO₂: {spo2}%")
+                # 🔴 2. Detect heart condition alerts
+                
+                if heart_rate > 100:
+                    heart_alerts.append(f"⚠️ High BPM: {heart_rate} bpm (Tachycardia)")
+                elif heart_rate < 60:
+                    heart_alerts.append(f"⚠️ Low BPM: {heart_rate} bpm (Bradycardia)")
+               
+                
+                if spo2 < 95:
+                    heart_alerts.append(f"⚠️ Low SpO₂: {spo2}%")
+                    
+                if spo2 > 95 and heart_rate < 100 and heart_rate >60:
+                    heart_alerts = []   
 
-            # 🔵 3. Decide who to alert and beep appropriately
-            if heart_alerts and not env_alerts:
-                if abnormal_start_times["patient_condition"] is None:
-                    abnormal_start_times["patient_condition"] = now
-                elif (now - abnormal_start_times["patient_condition"] >= ALERT_STABLE_DURATION and
-                      now - last_alert_times["patient_condition"] >= ALERT_COOLDOWN):
-                    BLYNK.log_event("patient_condition", "\n".join(heart_alerts))
-                    buzzer_beep('doctor')
-                    last_alert_times["patient_condition"] = now
+                # 🔵 3. Decide who to alert and beep appropriately
+                if heart_alerts and not env_alerts:
+                    if  abnormal_start_times["patient_condition"] is None:
+                        abnormal_start_times["patient_condition"] = now
+                    elif (now - abnormal_start_times["patient_condition"] >= ALERT_STABLE_DURATION and
+                        now - last_alert_times["patient_condition"] >= ALERT_COOLDOWN):
+                        print("Sending Blynk log_event: heart_alerts")
+                        BLYNK.log_event("patient_condition", "\n".join(heart_alerts))
+                        buzzer_beep('doctor')
+                        last_alert_times["patient_condition"] = now
+                else:
+                    abnormal_start_times["patient_condition"] = None
 
-            elif env_alerts and not heart_alerts:
-                if abnormal_start_times["room_conditions"] is None:
-                    abnormal_start_times["room_conditions"] = now
-                elif (now - abnormal_start_times["room_conditions"] >= ALERT_STABLE_DURATION and
-                      now - last_alert_times["room_conditions"] >= ALERT_COOLDOWN):
-                    BLYNK.log_event("room_conditions", "\n".join(env_alerts))
-                    buzzer_beep('nurse_env')
-                    last_alert_times["room_conditions"] = now
+                if env_alerts and not heart_alerts:
+                    if  abnormal_start_times["room_conditions"] is None :
+                        abnormal_start_times["room_conditions"] = now
+                    elif (now - abnormal_start_times["room_conditions"] >= ALERT_STABLE_DURATION and
+                          now - last_alert_times["room_conditions"] >= ALERT_COOLDOWN):
+                        print("Sending Blynk log_event: room_conditions")
+                        BLYNK.log_event("room_conditions", "\n".join(env_alerts))
+                        buzzer_beep('nurse_env')
+                        last_alert_times["room_conditions"] = now
+                else:
+                    abnormal_start_times["room_conditions"] = None
 
-            elif env_alerts and heart_alerts:
-                if abnormal_start_times["patient_discomfort"] is None:
-                    abnormal_start_times["patient_discomfort"] = now
-                elif (now - abnormal_start_times["patient_discomfort"] >= ALERT_STABLE_DURATION and
-                      now - last_alert_times["patient_discomfort"] >= ALERT_COOLDOWN):
-                    all_alerts = heart_alerts + env_alerts
-                    BLYNK.log_event("patient_discomfort", "\n".join(all_alerts))
-                    buzzer_beep('nurse_both')
-                    last_alert_times["patient_discomfort"] = now
-
-            # 🔘 Reset timers when conditions are safe again
-            if not heart_alerts:
-                abnormal_start_times["patient_condition"] = None
-            if not env_alerts:
-                abnormal_start_times["room_conditions"] = None
-            if not heart_alerts or not env_alerts:
-                abnormal_start_times["patient_discomfort"] = None
-
-
-
+                if env_alerts and heart_alerts:
+                    if  abnormal_start_times["patient_discomfort"] is None :
+                        abnormal_start_times["patient_discomfort"] = now
+                    elif (now - abnormal_start_times["patient_discomfort"] >= ALERT_STABLE_DURATION and
+                        now - last_alert_times["patient_discomfort"] >= ALERT_COOLDOWN):
+                        all_alerts = heart_alerts + env_alerts
+                        print("Sending Blynk log_event: patient_discomfort")
+                        BLYNK.log_event("patient_discomfort", "\n".join(all_alerts))
+                        buzzer_beep('nurse_both')
+                        last_alert_times["patient_discomfort"] = now
+                else:
+                    abnormal_start_times["patient_discomfort"] = None
+                
             BLYNK.run()
+
+     
+            
             
 
 if __name__ == "__main__":
+    
     main()
-
+    

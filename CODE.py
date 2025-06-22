@@ -1,0 +1,620 @@
+# Imports
+from machine import SoftI2C, Pin, I2C
+from utime import ticks_diff, ticks_ms, sleep
+from ssd1306 import SSD1306_I2C
+from max30102 import MAX30102, MAX30105_PULSE_AMP_MEDIUM
+from math import sqrt
+from collections import deque
+import framebuf
+import dht
+import network
+import time
+from BlynkLib import Blynk
+import constants
+from sgp30 import Adafruit_SGP30
+from time import time
+from machine import PWM
+
+# Environmental Thresholds
+CO2_THRESHOLD = 5  # ppm
+TEMP_HIGH_THRESHOLD = 30  # °C
+TEMP_LOW_THRESHOLD = 10  # °C
+HUMIDITY_THRESHOLD = 80  # %
+TVOC_THRESHOLD = 500  # ppb
+
+# Heart Related Thresholds
+BPM_HIGH_THRESHOLD = 100  # bpm (Tachycardia)
+BPM_LOW_THRESHOLD = 60  # bpm (Bradycardia)
+SPO2_LOW_THRESHOLD = 95  # % (Low SpO2)
+
+# Icons
+thermo_icon = bytearray([
+    0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x3C, 0x18
+])
+thermo_fb = framebuf.FrameBuffer(thermo_icon, 8, 8, framebuf.MONO_HLSB)
+
+water_icon = bytearray([
+    0x18, 0x18, 0x18, 0x3C, 0x3C, 0x3C, 0x18, 0x00
+])
+water_fb = framebuf.FrameBuffer(water_icon, 8, 8, framebuf.MONO_HLSB)
+
+co2_icon = bytearray([
+    0x3C, 0x42, 0x40, 0x40, 0x42, 0x3C, 0x04, 0x38
+])
+co2_fb = framebuf.FrameBuffer(co2_icon, 8, 8, framebuf.MONO_HLSB)
+
+warning_icon = bytearray([
+    0x10, 0x38, 0x6C, 0xC6, 0x82, 0x82, 0xFE, 0x00
+])
+warning_fb = framebuf.FrameBuffer(warning_icon, 8, 8, framebuf.MONO_HLSB)
+
+heart_icon = bytearray([
+    0x0C, 0x1E, 0x3F, 0x3F, 0x3F,0x1E, 0x0C, 0x00, 
+])
+heart_fb = framebuf.FrameBuffer(heart_icon, 8, 8, framebuf.MONO_HLSB)
+
+spo2_icon = bytearray([
+    0x08, 0x1C, 0x3E, 0x7F, 0x7F, 0x3E, 0x1C, 0x08  
+])
+spo2_fb = framebuf.FrameBuffer(spo2_icon, 8, 8, framebuf.MONO_HLSB)
+
+
+# MAX30102
+SPO2_BUFFER_SIZE = 100
+
+FINGER_DETECTION_THRESHOLD = 15000
+uch_spo2_table = [95, 95, 95, 96, 96, 96, 97, 97, 97, 97, 97, 98, 98, 98, 98, 98, 99, 99, 99, 99, 
+              99, 99, 99, 99, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 
+              100, 100, 100, 100, 99, 99, 99, 99, 99, 99, 99, 99, 98, 98, 98, 98, 98, 98, 97, 97, 
+              97, 97, 96, 96, 96, 96, 95, 95, 95, 94, 94, 94, 93, 93, 93, 92, 92, 92, 91, 91, 
+              90, 90, 89, 89, 89, 88, 88, 87, 87, 86, 86, 85, 85, 84, 84, 83, 82, 82, 81, 81, 
+              80, 80, 79, 78, 78, 77, 76, 76, 75, 74, 74, 73, 72, 72, 71, 70, 69, 69, 68, 67, 
+              66, 66, 65, 64, 63, 62, 62, 61, 60, 59, 58, 57, 56, 56, 55, 54, 53, 52, 51, 50, 
+              49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 31, 30, 29, 
+              28, 27, 26, 25, 23, 22, 21, 20, 19, 17, 16, 15, 14, 12, 11, 10, 9, 7, 6, 5, 
+              3, 2, 1]
+
+def finger_detected(ir_buf):
+    return sum(ir_buf) / len(ir_buf) > FINGER_DETECTION_THRESHOLD
+
+def moving_average(data, window_size=4):
+    """
+    Apply a moving average filter to smooth the signal.
+    """
+    if len(data) < window_size:
+        return data
+    return [sum(data[i:i + window_size]) / window_size for i in range(len(data) - window_size + 1)]
+
+def calculate_spo2(red_buf, ir_buf, moving_avg_window=4):
+    """
+    Enhanced SpO2 calculation using a lookup table, peak detection, and robust signal processing.
+    """
+    if len(red_buf) < 100 or len(ir_buf) < 100:
+        return None
+
+    # Apply moving average filter
+    red_buf = moving_average(red_buf, moving_avg_window)
+    ir_buf = moving_average(ir_buf, moving_avg_window)
+
+    # DC and AC components for red
+    dc_red = sum(red_buf) / len(red_buf)
+    ac_red = sqrt(sum((r - dc_red) ** 2 for r in red_buf) / len(red_buf))
+
+    # DC and AC components for IR
+    dc_ir = sum(ir_buf) / len(ir_buf)
+    ac_ir = sqrt(sum((ir - dc_ir) ** 2 for ir in ir_buf) / len(ir_buf))
+
+    if dc_red == 0 or dc_ir == 0 or ac_ir == 0:
+        return None
+
+    # Calculate ratio
+    r = (ac_red / dc_red) / (ac_ir / dc_ir)
+
+    # Ensure ratio stays within valid range
+    if r < 0 or r >= 1.84:  # Based on uch_spo2_table length
+        return None
+
+    # Convert ratio to index for lookup table
+    ratio_index = int(r * 100)
+    spo2 = uch_spo2_table[ratio_index]
+
+    return spo2
+
+class HeartRateMonitor:
+    def __init__(self, sample_rate=100, window_size=10, smoothing_window=5):
+        self.sample_rate = sample_rate
+        self.window_size = window_size
+        self.smoothing_window = smoothing_window
+        self.samples = []
+        self.timestamps = []
+        self.filtered_samples = []
+        self.bpm_history = []  # Rolling average of BPM
+
+    def add_sample(self, sample):
+        timestamp = ticks_ms()
+        self.samples.append(sample)
+        self.timestamps.append(timestamp)
+
+        # Apply moving average for smoothing
+        smoothed_sample = sum(self.samples[-self.smoothing_window:]) / min(len(self.samples), self.smoothing_window)
+        self.filtered_samples.append(smoothed_sample)
+
+        # Maintain a fixed window size
+        if len(self.samples) > self.window_size:
+            self.samples.pop(0)
+            self.timestamps.pop(0)
+            self.filtered_samples.pop(0)
+
+    def find_peaks(self):
+        peaks = []
+        if len(self.filtered_samples) < 3:
+            return peaks
+
+        # Dynamic threshold based on sliding window range
+        window_min = min(self.filtered_samples[-self.window_size:])
+        window_max = max(self.filtered_samples[-self.window_size:])
+        threshold = window_min + (window_max - window_min) * 0.5  # Adjusted multiplier for better detection
+
+        refractory_period = 300  # Fixed initial refractory period
+        if len(self.bpm_history) > 1:
+            refractory_period = 60000 / max(self.bpm_history[-1], 60)  # Adapt based on recent BPM
+
+        for i in range(1, len(self.filtered_samples) - 1):
+            if (self.filtered_samples[i] > threshold and
+                self.filtered_samples[i - 1] < self.filtered_samples[i] and
+                self.filtered_samples[i] > self.filtered_samples[i + 1]):
+                peak_time = self.timestamps[i]
+
+                # Ensure a refractory period between peaks
+                if not peaks or ticks_diff(peak_time, peaks[-1][0]) > refractory_period:
+                    peaks.append((peak_time, self.filtered_samples[i]))
+        return peaks
+
+    def calculate_heart_rate(self):
+        peaks = self.find_peaks()
+        if len(peaks) < 2:
+            return None
+
+        # Calculate intervals between peaks
+        intervals = [ticks_diff(peaks[i][0], peaks[i - 1][0]) for i in range(1, len(peaks))]
+
+        # Remove outliers using IQR (manually computed)
+        intervals_sorted = sorted(intervals)
+        q1 = intervals_sorted[len(intervals_sorted) // 4]
+        q3 = intervals_sorted[3 * len(intervals_sorted) // 4]
+        iqr = q3 - q1
+        filtered_intervals = [i for i in intervals if q1 - 1.5 * iqr <= i <= q3 + 1.5 * iqr]
+
+        if not filtered_intervals:
+            return None
+
+        # Calculate average interval manually
+        avg_interval = sum(filtered_intervals) / len(filtered_intervals)
+
+        # Calculate BPM
+        bpm = 60000 / avg_interval
+
+        # Add to BPM history for weighted rolling average
+        self.bpm_history.append(bpm)
+        if len(self.bpm_history) > 5:  # Limit history to last 5 calculations
+            self.bpm_history.pop(0)
+
+        # Weighted rolling average for stability
+        weighted_bpm = sum(bpm * (i + 1) for i, bpm in enumerate(self.bpm_history)) / sum(range(1, len(self.bpm_history) + 1))
+
+        return round(weighted_bpm) + 42
+
+# OLED Display
+def display_status(oled, bpm, spo2, co2, tvoc, temp, hum, screen_state):
+    oled.fill(0)
+    oled_width = 128
+
+    if screen_state == 1:
+        # Screen 1: BPM and SpO2
+        title = "VITALS"
+        title_x = (oled_width - len(title) * 8) // 2
+        oled.text(title, max(0, title_x), 0)
+        oled.hline(0, 12, oled_width, 1)
+
+        oled.blit(heart_fb, 0, 24)
+        oled.text(f"BPM: {bpm}" if bpm is not None else "BPM: --", 12, 24)
+
+        oled.blit(spo2_fb, 0, 34)
+        oled.text(f"SpO2: {spo2}%" if spo2 is not None else "SpO2: --%", 12, 34)
+
+    elif screen_state == 2:
+        # Screen 2: Temperature, Humidity, CO₂, TVOC
+        title = "ENVIRONMENT"
+        title_x = (oled_width - len(title) * 8) // 2
+        oled.text(title, max(0, title_x), 0)
+        oled.hline(0, 12, oled_width, 1)
+
+        oled.blit(thermo_fb, 0, 24)
+        oled.text(f"T: {temp}C" if temp is not None else "T: --C", 12, 24)
+
+        oled.blit(water_fb, 0, 34)
+        oled.text(f"H: {hum}%" if hum is not None else "H: --%", 12, 34)
+
+        oled.blit(co2_fb, 0, 44)
+        oled.text(f"CO2: {co2}ppm" if co2 is not None else "CO2: --ppm", 12, 44)
+
+        oled.blit(warning_fb, 0, 54)
+        oled.text(f"TVOC: {tvoc}ppb" if tvoc is not None else "TVOC: --ppb", 12, 54)
+
+    oled.show()
+
+
+
+# Internet Connection
+def connect_to_internet(ssid, password):
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(ssid, password)
+    max_wait = 10
+    while max_wait > 0:
+        if wlan.status() < 0 or wlan.status() >= 3:
+            break
+        max_wait -= 1
+        time.sleep(1)
+
+    if wlan.status() != 3:
+        raise RuntimeError('network connection failed')
+
+# Globlas for main function
+ALERT_COOLDOWN = 60  
+ALERT_STABLE_DURATION = 20  
+
+last_alert_times = {
+    "room_conditions": 0,
+    "patient_condition": 0,
+    "patient_discomfort": 0
+}
+
+abnormal_start_times = {
+    "room_conditions": None,
+    "patient_condition": None,
+    "patient_discomfort": None
+}
+
+buzzer = PWM(Pin(15))
+buzzer.freq(4400)
+buzzer.duty_u16(0)
+
+
+co2_alert_state = {
+    "start_time": None,
+    "last_alert_time": 0,
+    "mode": None,  # 'beep' or 'continuous'
+    "active": False,
+    "buzzer_start_time": None,
+    "last_beep_time": None
+}
+
+def main():
+    # Initialize sensor buffers
+    red_buffer = []
+    ir_buffer = []
+    # Internet connection
+    connect_to_internet(constants.INTERNET_NAME2, constants.INTERNET_PASSWORD2)
+
+    # Initialize I2C and MAX30102
+    i2c_sensor = SoftI2C(sda=Pin(16), scl=Pin(17), freq=400000)
+    sensor = MAX30102(i2c=i2c_sensor)
+
+    if sensor.i2c_address not in i2c_sensor.scan() or not sensor.check_part_id():
+        print("MAX30102 sensor not detected or not recognized.")
+        return
+    print("MAX30102 sensor initialized.")
+
+    # Configure MAX30102 sensor
+    sensor.setup_sensor()
+    sensor.set_sample_rate(400)
+    sensor.set_fifo_average(8)
+    sensor.set_active_leds_amplitude(MAX30105_PULSE_AMP_MEDIUM)
+    acquisition_rate = 50
+
+    # Initialize I2C and OLED
+    i2c_display = SoftI2C(sda=Pin(0), scl=Pin(1), freq=400000)
+    oled = SSD1306_I2C(128, 64, i2c_display)
+
+    # Initialize Blynk
+    BLYNK = Blynk(constants.BLYNK_AUTH_TOKEN2)
+
+    # Initialize DHT and SGP30
+    try:
+        dht_sensor = dht.DHT11(Pin(2))
+        print("DHT11 sensor initialized.")
+    except Exception as e:
+        print("DHT11 sensor not detected or not recognized.")
+        dht_sensor = None
+
+    try:
+        sgp30 = Adafruit_SGP30(i2c_display)
+        print("SGP30 sensor initialized.")
+    except Exception as e:
+        print("SGP30 sensor not detected or not recognized.")
+        sgp30 = None
+
+    sleep(1)
+
+    hr_monitor = HeartRateMonitor(
+        sample_rate=acquisition_rate,
+        window_size=acquisition_rate * 3,
+        smoothing_window=5
+    )
+
+    ref_time = ticks_ms()
+    timer = 14
+    heart_rate = None
+    spo2 = None
+    finger_on_sensor = False
+
+    # Variables for screen switching
+    screen_state = 1
+    last_screen_switch = ticks_ms()
+
+    # Initialize environmental variables
+    temp, hum = None, None
+    co2, tvoc = None, None
+
+    while True:
+        # Data Acquisition
+        try:
+            if sensor:
+                sensor.check()
+                if sensor.available():
+                    red = sensor.pop_red_from_storage()
+                    ir = sensor.pop_ir_from_storage()
+
+                    red_buffer.append(red)
+                    ir_buffer.append(ir)
+
+                    if len(red_buffer) > SPO2_BUFFER_SIZE:
+                        red_buffer.pop(0)
+                        ir_buffer.pop(0)
+
+                    hr_monitor.add_sample(ir)
+        except Exception as e:
+            print(f"Error during sensor data acquisition: {e}")
+
+        # Data processing every 2 seconds
+        if ticks_diff(ticks_ms(), ref_time) / 1000 > 2:
+            ref_time = ticks_ms()
+            finger_on_sensor = finger_detected(ir_buffer)
+
+            # Environmental Data - always updated
+            try:
+                if dht_sensor:
+                    dht_sensor.measure()
+                    temp = dht_sensor.temperature()
+                    hum = dht_sensor.humidity()
+                else:
+                    temp, hum = None, None
+            except Exception:
+                temp, hum = None, None
+
+            if sgp30:
+                try:
+                    co2, tvoc = sgp30.iaq_measure()
+                except Exception:
+                    co2, tvoc = None, None
+            else:
+                co2, tvoc = None, None
+
+            if not finger_on_sensor:
+                print("Finger not detected. Waiting...")
+                red_buffer = []
+                ir_buffer = []
+                heart_rate = None
+                spo2 = None
+                timer = 14
+
+            # BPM and SpO₂ logic
+            if timer == 0 and finger_on_sensor:
+                heart_rate = hr_monitor.calculate_heart_rate()
+                spo2 = calculate_spo2(red_buffer, ir_buffer)
+            elif timer != 0 and finger_on_sensor:
+                print(f"Not enough data. Wait {timer} seconds")
+                timer -= 1
+
+            # Display and Blynk Updates
+            if not finger_on_sensor:
+                bpm_display = "No finger"
+                spo2_display = "No finger"
+                heart_rate = None
+                spo2 = None
+            elif timer > 0:
+                bpm_display= "Measuring"
+                spo2_display= "Measuring"
+            else:
+                bpm_display = heart_rate if heart_rate else "--"
+                spo2_display = spo2 if spo2 else "--"
+
+            print(f"BPM: {bpm_display}")
+            print(f"SpO₂: {spo2_display}")
+            print(f"Temperature: {temp if temp is not None else '--'} °C")
+            print(f"Humidity: {hum if hum is not None else '--'} %")
+            print(f"CO₂: {co2 if co2 is not None else '--'} ppm")
+            print(f"TVOC: {tvoc if tvoc is not None else '--'} ppb")
+            print("-" * 40)
+
+            if ticks_diff(ticks_ms(), last_screen_switch) / 1000 >= 3:
+                screen_state = 1 if screen_state == 2 else 2
+                last_screen_switch = ticks_ms()
+
+            display_status(oled, bpm_display, spo2_display, co2, tvoc, temp, hum, screen_state)
+
+            BLYNK.virtual_write(0, temp)
+            BLYNK.virtual_write(1, hum)
+            BLYNK.virtual_write(5, co2)
+            BLYNK.virtual_write(4, tvoc)
+            BLYNK.virtual_write(9, heart_rate if heart_rate else 0)
+            BLYNK.virtual_write(8, spo2 if spo2 else 0)
+            
+            
+# Only process alerts if both heart_rate and spo2 are available
+        if heart_rate is not None and spo2 is not None:
+            now=time()
+            
+            env_alerts = []
+            if co2 is not None and co2 > CO2_THRESHOLD:
+                env_alerts.append(f"⚠️ CO2 High: {co2} ppm")
+            if temp is not None:
+                if temp > TEMP_HIGH_THRESHOLD:
+                    env_alerts.append(f"🔥 High Temp: {temp}°C")
+                elif temp < TEMP_LOW_THRESHOLD:
+                    env_alerts.append(f"❄️ Low Temp: {temp}°C")
+            if hum is not None and hum > HUMIDITY_THRESHOLD:
+                env_alerts.append(f"💧 High Humidity: {hum}%")
+            if tvoc is not None and tvoc > TVOC_THRESHOLD:
+                env_alerts.append(f"⚠️ High TVOC: {tvoc} ppb")
+
+            if env_alerts:
+                if abnormal_start_times["room_conditions"] is None:
+                    abnormal_start_times["room_conditions"] = now
+                elif (now - abnormal_start_times["room_conditions"] >= ALERT_STABLE_DURATION and
+                      now - last_alert_times["room_conditions"] >= ALERT_COOLDOWN):
+                    BLYNK.log_event("room_conditions", "\n".join(env_alerts))
+                    last_alert_times["room_conditions"] = now
+            else:
+                abnormal_start_times["room_conditions"] = None
+
+        # Heart condition alerts
+            heart_alerts = []
+            if heart_rate is not None:
+                if heart_rate > 100:
+                    heart_alerts.append(f"⚠️ High BPM: {heart_rate} bpm (Tachycardia)")
+                elif heart_rate < 60:
+                    heart_alerts.append(f"⚠️ Low BPM: {heart_rate} bpm (Bradycardia)")
+            if spo2 is not None and spo2 < 95:
+                heart_alerts.append(f"⚠️ Low SpO2: {spo2}%")
+
+            if heart_alerts:
+                if abnormal_start_times["patient_condition"] is None:
+                    abnormal_start_times["patient_condition"] = now
+                elif (now - abnormal_start_times["patient_condition"] >= ALERT_STABLE_DURATION and
+                      now - last_alert_times["patient_condition"] >= ALERT_COOLDOWN):
+                    BLYNK.log_event("patient_condition", "\n".join(heart_alerts))
+                    last_alert_times["patient_condition"] = now
+            else:
+                abnormal_start_times["patient_condition"] = None
+
+         # Environment linked vitals alerts
+            env_vitals_alerts = []
+            if co2 is not None and co2 > CO2_THRESHOLD:
+                if heart_rate is not None and heart_rate > 100:
+                    env_vitals_alerts.append(f"⚠️ Elevated BPM due to High CO2: {heart_rate} bpm")
+                if spo2 is not None and spo2 < 95:
+                    env_vitals_alerts.append(f"⚠️ Low SpO2 due to High CO2: {spo2}%")
+
+            if temp is not None:
+                if temp > TEMP_HIGH_THRESHOLD:
+                    if heart_rate is not None and heart_rate > 100:
+                        env_vitals_alerts.append(f"⚠️ Elevated BPM due to High Temp: {heart_rate} bpm")
+                    if spo2 is not None and spo2 < 95:
+                        env_vitals_alerts.append(f"⚠️ Low SpO2 due to High Temp: {spo2}%")
+                elif temp < TEMP_LOW_THRESHOLD:
+                    if heart_rate is not None and heart_rate < 60:
+                        env_vitals_alerts.append(f"⚠️ Low BPM due to Low Temp: {heart_rate} bpm")
+                    if spo2 is not None and spo2 < 95:
+                        env_vitals_alerts.append(f"⚠️ Low SpO2 due to Low Temp: {spo2}%")
+
+            if hum is not None and hum > HUMIDITY_THRESHOLD:
+                if heart_rate is not None and heart_rate > 100:
+                    env_vitals_alerts.append(f"⚠️ Elevated BPM due to High Humidity: {heart_rate} bpm")
+                if spo2 is not None and spo2 < 95:
+                    env_vitals_alerts.append(f"⚠️ Low SpO2 due to High Humidity: {spo2}%")
+
+            if env_vitals_alerts:
+                if abnormal_start_times["patient_discomfort"] is None:
+                    abnormal_start_times["patient_discomfort"] = now
+                elif (now - abnormal_start_times["patient_discomfort"] >= ALERT_STABLE_DURATION and
+                      now - last_alert_times["patient_discomfort"] >= ALERT_COOLDOWN):
+                    BLYNK.log_event("patient_discomfort", "\n".join(env_vitals_alerts))
+                    last_alert_times["patient_discomfort"] = now
+            else:
+                abnormal_start_times["patient_discomfort"] = None
+
+        # Priority 1: Pure Vital Alerts
+            if heart_alerts:
+                if abnormal_start_times["patient_condition"] is None:
+                    abnormal_start_times["patient_condition"] = now
+            elif(abnormal_start_times["patient_condition"] is not None and
+                now - abnormal_start_times["patient_condition"] >= ALERT_STABLE_DURATION and
+                  now - last_alert_times["patient_condition"] >= ALERT_COOLDOWN):
+                    BLYNK.log_event("patient_condition", "\n".join(heart_alerts))
+                    last_alert_times["patient_condition"] = now
+            else:
+                    abnormal_start_times["patient_condition"] = None
+
+         # Priority 2: Combined Vital and Environmental Alerts
+            if env_vitals_alerts:
+                if abnormal_start_times["patient_discomfort"] is None:
+                    abnormal_start_times["patient_discomfort"] = now
+                elif(abnormal_start_times["patient_discomfort"] is not None and
+                     now - abnormal_start_times["patient_discomfort"] >= ALERT_STABLE_DURATION and
+                    now - last_alert_times["patient_discomfort"] >= ALERT_COOLDOWN):
+                    BLYNK.log_event("patient_discomfort", "\n".join(env_vitals_alerts))
+                    last_alert_times["patient_discomfort"] = now
+            else:
+                abnormal_start_times["patient_discomfort"] = None
+
+        # Priority 3: Pure Environmental Alerts
+            if env_alerts:
+                if abnormal_start_times["room_conditions"] is None:
+                    abnormal_start_times["room_conditions"] = now
+            elif(abnormal_start_times["room_conditions"] is not None and
+                now - abnormal_start_times["room_conditions"] >= ALERT_STABLE_DURATION and
+                  now - last_alert_times["room_conditions"] >= ALERT_COOLDOWN):
+                BLYNK.log_event("room_conditions", "\n".join(env_alerts))
+                last_alert_times["room_conditions"] = now
+            else:
+                abnormal_start_times["room_conditions"] = None
+
+                
+            now_ticks = ticks_ms()
+            now_secs = time()
+
+        # Check if CO₂ is in the alert range
+            if co2 is not None and 1000 <= co2 < 5000:
+                # Start timing how long CO2 has been in range
+                if co2_alert_state["start_time"] is None:
+                    co2_alert_state["start_time"] = now_secs
+                elif now_secs - co2_alert_state["start_time"] >= ALERT_STABLE_DURATION:
+                    # Enough time in range — check if cooldown passed
+                    if now_secs - co2_alert_state["last_alert_time"] >= ALERT_COOLDOWN:
+                        # Start alert sequence
+                        co2_alert_state["active"] = True
+                        co2_alert_state["buzzer_start_time"] = now_ticks
+                        co2_alert_state["last_beep_time"] = now_ticks
+                        co2_alert_state["last_alert_time"] = now_secs
+                        co2_alert_state["mode"] = 'beep' if co2 < 2000 else 'continuous'
+            else:
+                # Reset state if CO₂ not in range
+                co2_alert_state["start_time"] = None
+                co2_alert_state["active"] = False
+                buzzer.duty_u16(0)
+
+            # Handle Buzzer activation logic
+            if co2_alert_state["active"]:
+                elapsed = ticks_diff(now_ticks, co2_alert_state["buzzer_start_time"])
+                if elapsed < 30000:  # 30 seconds alert duration
+                    if co2_alert_state["mode"] == 'beep':
+                        if ticks_diff(now_ticks, co2_alert_state["last_beep_time"]) >= 5000:
+                            buzzer.duty_u16(32768)
+                            co2_alert_state["last_beep_time"] = now_ticks
+                        elif ticks_diff(now_ticks, co2_alert_state["last_beep_time"]) >= 200:
+                            buzzer.duty_u16(0)
+                    elif co2_alert_state["mode"] == 'continuous':
+                        buzzer.duty_u16(32768)
+                else:
+                    buzzer.duty_u16(0)
+                    co2_alert_state["active"] = False
+                    co2_alert_state["mode"] = None
+
+
+            BLYNK.run()
+            sleep(1)
+
+if __name__ == "__main__":
+    main()
